@@ -1,5 +1,5 @@
 
-import streamlit as st
+
 
 st.set_page_config(
     page_title="MBTI 취향 추천",
