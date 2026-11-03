@@ -1,57 +1,86 @@
+import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
+import matplotlib.colors as mcolors
 
-# 1. 데이터 로드
-df = pd.read_csv('countriesMBTI_16types.csv')
-print("데이터 형태:", df.shape)
+# 페이지 기본 설정
+st.set_page_config(
+    page_title="국가별 MBTI 비율 분석",
+    page_icon="📊",
+    layout="wide"
+)
 
-# 2. 전 세계 평균 MBTI 분포 계산
-mbti_cols = [c for c in df.columns if c != 'Country']
-mean_mbti = df[mbti_cols].mean().sort_values(ascending=False)
-print("\n[전 세계 평균 MBTI 유형별 비율]")
-print(mean_mbti * 100)
+st.title("📊 국가별 MBTI 유형 비율 분석")
+st.write("국가를 선택하면 해당 국가의 16가지 MBTI 비율을 막대그래프로 확인하실 수 있습니다.")
 
-# 3. 4가지 성향 차원별(E/I, N/S, T/F, J/P) 글로벌 평균 계산
-E_types = [c for c in mbti_cols if c.startswith('E')]
-I_types = [c for c in mbti_cols if c.startswith('I')]
-N_types = [c for c in mbti_cols if c[1] == 'N']
-S_types = [c for c in mbti_cols if c[1] == 'S']
-T_types = [c for c in mbti_cols if c[2] == 'T']
-F_types = [c for c in mbti_cols if c[2] == 'F']
-J_types = [c for c in mbti_cols if c.endswith('J')]
-P_types = [c for c in mbti_cols if c.endswith('P')]
+# 1. 데이터 로드 (UTF-8 및 CP949 자동 대응)
+@st.cache_data
+def load_data():
+    file_path = 'countriesMBTI_16types.csv'
+    try:
+        df = pd.read_csv(file_path, encoding='utf-8')
+    except (UnicodeDecodeError, FileNotFoundError):
+        df = pd.read_csv(file_path, encoding='cp949')
+    return df
 
-df['Introversion'] = df[I_types].sum(axis=1)
-df['Extraversion'] = df[E_types].sum(axis=1)
-df['Intuition'] = df[N_types].sum(axis=1)
-df['Sensing'] = df[S_types].sum(axis=1)
-df['Thinking'] = df[T_types].sum(axis=1)
-df['Feeling'] = df[F_types].sum(axis=1)
-df['Judging'] = df[J_types].sum(axis=1)
-df['Perceiving'] = df[P_types].sum(axis=1)
+try:
+    df = load_data()
+    mbti_cols = [c for c in df.columns if c != 'Country']
+    
+    # 2. 국가 선택 사이드바
+    country_list = sorted(df['Country'].unique())
+    default_idx = country_list.index("South Korea") if "South Korea" in country_list else 0
+    selected_country = st.sidebar.selectbox("국가를 선택하세요", country_list, index=default_idx)
+    
+    # 선택 국가 데이터 추출 및 퍼센트 환산
+    country_data = df[df['Country'] == selected_country].iloc[0]
+    mbti_series = country_data[mbti_cols].astype(float) * 100
+    mbti_sorted = mbti_series.sort_values(ascending=False)
+    
+    # 3. 색상 팔레트 생성
+    # 1등: 빨간색 (#E63946)
+    # 2등 ~ 16등: 진한 파랑 (#1D3557)에서 연한 파랑 (#A8DADC) 그라데이션
+    cmap = mcolors.LinearSegmentedColormap.from_list("blue_grad", ["#1D3557", "#A8DADC"])
+    num_other_types = len(mbti_sorted) - 1
+    
+    colors = ["#E63946"]
+    for i in range(num_other_types):
+        colors.append(mcolors.to_hex(cmap(i / max(1, num_other_types - 1))))
 
-print("\n[성향 차원별 글로벌 평균]")
-print(f"내향형(I): {df['Introversion'].mean()*100:.2f}% vs 외향형(E): {df['Extraversion'].mean()*100:.2f}%")
-print(f"직관형(N): {df['Intuition'].mean()*100:.2f}% vs 감각형(S): {df['Sensing'].mean()*100:.2f}%")
-print(f"사고형(T): {df['Thinking'].mean()*100:.2f}% vs 감정형(F): {df['Feeling'].mean()*100:.2f}%")
-print(f"판단형(J): {df['Judging'].mean()*100:.2f}% vs 인식형(P): {df['Perceiving'].mean()*100:.2f}%")
+    # 4. 그래프 그리기
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bars = ax.bar(mbti_sorted.index, mbti_sorted.values, color=colors, edgecolor='none')
+    
+    # 수치 표시
+    for bar in bars:
+        height = bar.get_height()
+        ax.annotate(f'{height:.1f}%',
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 3),
+                    textcoords="offset points",
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    ax.set_title(f"[{selected_country}] MBTI Distribution", fontsize=16, pad=15, fontweight='bold')
+    ax.set_xlabel("MBTI Types", fontsize=12)
+    ax.set_ylabel("Percentage (%)", fontsize=12)
+    ax.set_ylim(0, max(mbti_sorted.values) * 1.2)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.xticks(rotation=0)
+    plt.tight_layout()
+    
+    # Streamlit 출력
+    st.pyplot(fig)
+    
+    # 상위 5개 요약 테이블
+    st.subheader(f"📌 {selected_country} 상위 MBTI Top 5")
+    top5_df = pd.DataFrame({
+        'MBTI 유형': mbti_sorted.head(5).index,
+        '비율 (%)': [f"{val:.2f}%" for val in mbti_sorted.head(5).values]
+    }).reset_index(drop=True)
+    st.table(top5_df)
 
-# 4. 대한민국(South Korea) 데이터 조회
-korea_data = df[df['Country'] == 'South Korea']
-if not korea_data.empty:
-    print("\n[대한민국 MBTI 분포 순위]")
-    sk_sorted = korea_data[mbti_cols].iloc[0].sort_values(ascending=False) * 100
-    print(sk_sorted)
-
-# 5. 시각화 (상위 10개 유형 바차트)
-plt.figure(figsize=(10, 6))
-mean_mbti.head(10).plot(kind='bar', color='skyblue', edgecolor='black')
-plt.title('Global Average Top 10 MBTI Types', fontsize=14)
-plt.xlabel('MBTI Type', fontsize=12)
-plt.ylabel('Proportion', fontsize=12)
-plt.xticks(rotation=0)
-plt.grid(axis='y', linestyle='--', alpha=0.7)
-plt.tight_layout()
-plt.savefig('global_mbti_top10.png')
-print("\n시각화 파일('global_mbti_top10.png')이 저장되었습니다.")
+except FileNotFoundError:
+    st.error("⚠️ 'countriesMBTI_16types.csv' 파일을 찾을 수 없습니다. github 리포지토리 최상위 경로에 파일을 업로드해 주세요.")
+except Exception as e:
+    st.error(f"⚠️ 오류가 발생했습니다: {e}")
