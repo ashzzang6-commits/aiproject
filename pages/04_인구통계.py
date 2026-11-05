@@ -2,248 +2,282 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import re
 from pathlib import Path
 
-# -----------------------------
-# 1. 페이지 설정
-# -----------------------------
+# 페이지 설정
 st.set_page_config(
-    page_title="서울시 연령별 인구 분석",
-    page_icon="🌸",
+    page_title="인구통계 분석",
+    page_icon="📊",
     layout="wide"
 )
 
-# -----------------------------
-# 2. CSV 파일 경로 설정
-# -----------------------------
+st.title("📊 대한민국 인구통계 분석")
+st.write("행정구역과 성별에 따른 연령별 인구를 확인해 보세요!")
+
+# CSV 파일 경로
 BASE_DIR = Path(__file__).resolve().parent.parent
 CSV_PATH = BASE_DIR / "population.csv"
 
-# -----------------------------
-# 3. CSV 파일 불러오기
-# -----------------------------
+
+# CSV 파일 읽기
 @st.cache_data
-def load_data():
+def load_data(path):
     encodings = ["cp949", "euc-kr", "utf-8-sig", "utf-8"]
 
     for encoding in encodings:
         try:
-            df = pd.read_csv(
-                CSV_PATH,
-                encoding=encoding
+            return pd.read_csv(
+                path,
+                encoding=encoding,
+                dtype=str
             )
-            break
         except UnicodeDecodeError:
             continue
-    else:
-        raise ValueError(
-            "CSV 파일의 인코딩을 확인해 주세요."
-        )
 
-    # 인구수에 포함된 쉼표 제거 후 숫자로 변환
-    for col in df.columns:
-        if col.startswith("2025년_"):
-            df[col] = pd.to_numeric(
-                df[col].astype(str).str.replace(",", ""),
-                errors="coerce"
-            )
-
-    return df
+    raise ValueError("CSV 파일의 한글 인코딩을 확인해 주세요.")
 
 
-try:
-    df = load_data()
-except FileNotFoundError:
-    st.error(
-        "population.csv 파일을 찾을 수 없습니다. "
-        "상위 폴더에 CSV 파일이 있는지 확인해 주세요."
-    )
+# 파일 존재 확인
+if not CSV_PATH.exists():
+    st.error("population.csv 파일을 찾을 수 없습니다.")
+    st.info("population.csv 파일이 프로젝트 최상위 폴더에 있는지 확인해 주세요.")
     st.stop()
 
-# -----------------------------
-# 4. 제목
-# -----------------------------
-st.title("🌸 서울시 연령별 인구 분석")
-st.write(
-    "행정구역과 성별을 선택해 "
-    "연령대별 인구를 꺾은선 그래프로 확인해 보세요."
-)
+try:
+    df = load_data(CSV_PATH)
+except Exception as e:
+    st.error(f"CSV 파일을 읽는 중 오류가 발생했습니다: {e}")
+    st.stop()
 
-# -----------------------------
-# 5. 행정구역 이름 정리
-# -----------------------------
+
+# 컬럼 이름 정리
+df.columns = df.columns.str.strip()
+
+# 행정구역 컬럼 확인
+if "행정구역" not in df.columns:
+    st.error("CSV 파일에 '행정구역' 컬럼이 없습니다.")
+    st.write("현재 CSV 컬럼:", list(df.columns))
+    st.stop()
+
+
+# 행정구역 이름 정리
 df["지역명"] = (
     df["행정구역"]
-    .str.split(" (")
+    .fillna("")
+    .astype(str)
+    .str.split(" (", regex=False)
     .str[0]
     .str.strip()
 )
 
-# -----------------------------
-# 6. 선택 메뉴
-# -----------------------------
+df = df[df["지역명"] != ""]
+
+
+# 성별별 연령 컬럼 찾기
+age_columns = {
+    "전체": {},
+    "남성": {},
+    "여성": {}
+}
+
+for col in df.columns:
+    col_name = str(col).strip()
+
+    # 계, 남자, 여자 뒤에 있는 나이 찾기
+    match = re.search(
+        r"_(계|남자|여자)_(\d+)세$",
+        col_name
+    )
+
+    # 100세 이상 처리
+    if match is None:
+        match = re.search(
+            r"_(계|남자|여자)_(100세 이상)$",
+            col_name
+        )
+
+    if match:
+        gender = match.group(1)
+        age_text = match.group(2)
+
+        if age_text == "100세 이상":
+            age = 100
+        else:
+            age = int(age_text.replace("세", ""))
+
+        if gender == "계":
+            category = "전체"
+        elif gender == "남자":
+            category = "남성"
+        else:
+            category = "여성"
+
+        age_columns[category][age] = col
+
+
+# 연령 데이터 확인
+if not any(age_columns.values()):
+    st.error("연령별 인구 컬럼을 찾을 수 없습니다.")
+    st.write("CSV 컬럼 목록:")
+    st.write(list(df.columns))
+    st.stop()
+
+
+# 선택 영역
+st.subheader("🔎 분석 조건 선택")
+
 col1, col2 = st.columns(2)
 
 with col1:
+    regions = sorted(df["지역명"].unique().tolist())
+
     selected_region = st.selectbox(
-        "📍 행정구역 선택",
-        df["지역명"].tolist()
+        "행정구역 선택",
+        regions
     )
 
 with col2:
     selected_gender = st.selectbox(
-        "🚻 성별 선택",
+        "성별 선택",
         ["전체", "남성", "여성"]
     )
 
-# -----------------------------
-# 7. 선택한 데이터 찾기
-# -----------------------------
-selected_data = df[
-    df["지역명"] == selected_region
-].iloc[0]
 
-# -----------------------------
-# 8. 성별에 따른 데이터 열 선택
-# -----------------------------
-if selected_gender == "전체":
-    prefix = "2025년_거주자_"
-elif selected_gender == "남성":
-    prefix = "2025년_남_거주자_"
-else:
-    prefix = "2025년_여_거주자_"
+# 선택한 지역 데이터
+selected_data = df[df["지역명"] == selected_region]
 
-# -----------------------------
-# 9. 연령대별 인구 데이터
-# -----------------------------
-age_labels = [
-    "0~9세",
-    "10~19세",
-    "20~29세",
-    "30~39세",
-    "40~49세",
-    "50~59세",
-    "60~69세",
-    "70~79세",
-    "80~89세",
-    "90~99세",
-    "100세 이상"
-]
+if selected_data.empty:
+    st.warning("선택한 행정구역의 데이터가 없습니다.")
+    st.stop()
 
-age_columns = [
-    prefix + "0~9세",
-    prefix + "10~19세",
-    prefix + "20~29세",
-    prefix + "30~39세",
-    prefix + "40~49세",
-    prefix + "50~59세",
-    prefix + "60~69세",
-    prefix + "70~79세",
-    prefix + "80~89세",
-    prefix + "90~99세",
-    prefix + "100세 이상"
-]
 
-population = [
-    int(selected_data[col])
-    for col in age_columns
-]
+# 선택한 성별의 연령 컬럼
+selected_columns = age_columns[selected_gender]
 
-# -----------------------------
-# 10. 꺾은선 그래프
-# -----------------------------
+if not selected_columns:
+    st.error(
+        f"{selected_gender}의 연령별 인구 데이터가 없습니다."
+    )
+    st.stop()
+
+
+# 연령별 인구 데이터 만들기
+result = []
+
+for age, column in sorted(selected_columns.items()):
+    values = (
+        selected_data[column]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .str.strip()
+    )
+
+    population = pd.to_numeric(
+        values,
+        errors="coerce"
+    ).fillna(0).sum()
+
+    result.append({
+        "나이": age,
+        "인구수": int(population)
+    })
+
+chart_df = pd.DataFrame(result)
+
+if chart_df.empty:
+    st.warning("그래프를 표시할 데이터가 없습니다.")
+    st.stop()
+
+
+# 인구 정보
+total_population = int(chart_df["인구수"].sum())
+
+st.divider()
+
+metric1, metric2 = st.columns(2)
+
+with metric1:
+    st.metric(
+        "선택한 행정구역",
+        selected_region
+    )
+
+with metric2:
+    st.metric(
+        "연령별 인구 합계",
+        f"{total_population:,}명"
+    )
+
+
+# 그래프
+st.subheader(
+    f"📈 {selected_region} 연령별 인구 분포 ({selected_gender})"
+)
+
 fig = go.Figure()
 
 fig.add_trace(
     go.Scatter(
-        x=age_labels,
-        y=population,
+        x=chart_df["나이"],
+        y=chart_df["인구수"],
         mode="lines+markers",
         name="인구수",
         line=dict(
-            color="#FF1493",
-            width=4
+            color="hotpink",
+            width=3
         ),
         marker=dict(
-            color="#FF1493",
-            size=9
-        ),
-        hovertemplate=(
-            "연령대: %{x}<br>"
-            "인구수: %{y:,.0f}명"
-            "<extra></extra>"
+            size=6,
+            color="hotpink"
         )
     )
 )
 
-# -----------------------------
-# 11. 그래프 디자인
-# -----------------------------
+# Y축 눈금 계산
+max_population = int(chart_df["인구수"].max())
+y_max = max(
+    1000000,
+    ((max_population // 1000000) + 1) * 1000000
+)
+
 fig.update_layout(
-    title=f"{selected_region} {selected_gender} 연령별 인구",
+    xaxis_title="나이",
+    yaxis_title="인구수 (명)",
+    template="plotly_white",
+    height=550,
+    hovermode="x unified",
     xaxis=dict(
-        title="나이",
-        type="category",
-        categoryorder="array",
-        categoryarray=age_labels,
-        tickmode="array",
-        tickvals=age_labels,
-        ticktext=age_labels,
-        showgrid=True,
-        gridcolor="#E5E5E5",
-        gridwidth=1
+        tickmode="linear",
+        tick0=0,
+        dtick=10
     ),
     yaxis=dict(
-        title="인구수 (명)",
-        rangemode="tozero",
         tickmode="linear",
         tick0=0,
         dtick=1000000,
-        tickformat=",",
-        showgrid=True,
-        gridcolor="#E5E5E5",
-        gridwidth=1
-    ),
-    plot_bgcolor="white",
-    paper_bgcolor="white",
-    hovermode="x unified",
-    height=550,
-    margin=dict(
-        l=30,
-        r=30,
-        t=70,
-        b=30
+        range=[0, y_max]
     )
 )
 
-# -----------------------------
-# 12. 그래프 출력
-# -----------------------------
 st.plotly_chart(
     fig,
     use_container_width=True
 )
 
-# -----------------------------
-# 13. 선택한 데이터 표시
-# -----------------------------
-st.subheader("📊 연령대별 인구 데이터")
 
-result = pd.DataFrame({
-    "연령대": age_labels,
-    "인구수": population
-})
+# 데이터 표
+with st.expander("📋 연령별 인구 데이터 확인하기"):
+    display_df = chart_df.copy()
+    display_df["인구수"] = display_df["인구수"].map(
+        lambda x: f"{x:,}명"
+    )
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True
+    )
 
-result["인구수"] = result["인구수"].map(
-    lambda x: f"{x:,}명"
-)
+st.caption("※ 제공된 population.csv 데이터를 기준으로 분석합니다.")
 
-st.dataframe(
-    result,
-    hide_index=True,
-    use_container_width=True
-)
-
-
-   
   
