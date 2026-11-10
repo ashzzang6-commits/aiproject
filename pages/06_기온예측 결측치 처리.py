@@ -3,394 +3,527 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from statsmodels.tsa.holtwinters import Holt
-import warnings
 
-warnings.filterwarnings("ignore")
+# --------------------------------------------------
+# 1. 기본 설정
+# --------------------------------------------------
 
-# 페이지 설정
 st.set_page_config(
-    page_title="월별 기온 분석 및 예측",
+    page_title="월별 평균기온 분석 및 예측",
     page_icon="🌡️",
     layout="wide"
 )
 
-st.title("🌡️ 월별 기온 분석 및 미래 예측")
-st.write("1907년부터 2025년까지의 실제 기온을 분석하고 미래 기온을 예측합니다.")
+st.title("🌡️ 월별 평균기온 분석 및 미래 예측")
+st.write("1907년부터 2025년까지의 기온 데이터를 분석하고 미래 기온을 예측합니다.")
 
-st.divider()
-
-# ----------------------------------
-# 1. 데이터 불러오기
-# ----------------------------------
+# --------------------------------------------------
+# 2. 데이터 불러오기
+# --------------------------------------------------
 
 @st.cache_data
 def load_data():
+    try:
+        df = pd.read_csv("temperature.csv", encoding="cp949")
+    except UnicodeDecodeError:
+        df = pd.read_csv("temperature.csv", encoding="utf-8-sig")
 
-    df = pd.read_csv(
-        "temperature.csv",
-        encoding="cp949"
-    )
+    df.columns = df.columns.str.strip()
 
-    # 날짜에서 월과 연도 추출
-    date_info = df["일시"].astype(str).str.extract(
-        r"([A-Za-z]{3})-(\d{2})"
-    )
+    if "일시" not in df.columns:
+        raise ValueError("'일시' 컬럼을 찾을 수 없습니다.")
 
-    month_dict = {
-        "Jan": 1, "Feb": 2, "Mar": 3,
-        "Apr": 4, "May": 5, "Jun": 6,
-        "Jul": 7, "Aug": 8, "Sep": 9,
-        "Oct": 10, "Nov": 11, "Dec": 12
-    }
+    if "평균기온(℃)" not in df.columns:
+        raise ValueError("'평균기온(℃)' 컬럼을 찾을 수 없습니다.")
 
-    df["월"] = date_info[0].map(month_dict)
-
-    # 두 자리 연도를 실제 연도로 변환
-    yy = pd.to_numeric(date_info[1], errors="coerce")
-
-    # 1999년에서 2000년으로 넘어가는 시점 자동 확인
-    century_change = yy.diff().lt(0).cumsum()
-
-    df["연도"] = 1900 + yy + century_change * 100
-
-    # 평균기온 숫자로 변환
+    df["일시"] = pd.to_datetime(df["일시"], errors="coerce")
     df["평균기온(℃)"] = pd.to_numeric(
-        df["평균기온(℃)"],
-        errors="coerce"
+        df["평균기온(℃)"], errors="coerce"
     )
 
-    # 실제 데이터 1907~2025년만 사용
+    df = df.dropna(subset=["일시"])
     df = df[
-        (df["연도"] >= 1907) &
-        (df["연도"] <= 2025)
+        (df["일시"].dt.year >= 1907) &
+        (df["일시"].dt.year <= 2025)
     ].copy()
 
-    df = df.dropna(subset=["월"])
+    df["연도"] = df["일시"].dt.year
+    df["월"] = df["일시"].dt.month
 
     return df
 
 
-# ----------------------------------
-# 2. 데이터 분석
-# ----------------------------------
-
 try:
-
     df = load_data()
+except Exception as e:
+    st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
+    st.stop()
 
-    # 월 선택
-    month = st.selectbox(
-        "📅 분석할 월을 선택하세요.",
-        list(range(1, 13)),
-        format_func=lambda x: f"{x}월"
-    )
+if df.empty:
+    st.error("분석할 데이터가 없습니다.")
+    st.stop()
 
-    # 미래 예측 연도
-    forecast_year = st.number_input(
-        "🔮 예측할 미래 연도를 입력하세요.",
-        min_value=2026,
-        max_value=2100,
-        value=2030,
-        step=1
-    )
+# --------------------------------------------------
+# 3. 사용자 입력
+# --------------------------------------------------
 
-    # 선택한 월의 평균기온
-    selected_df = df[df["월"] == month]
+st.sidebar.header("⚙️ 분석 설정")
 
-    actual = selected_df.groupby("연도")[
-        "평균기온(℃)"
-    ].mean()
+month = st.sidebar.selectbox(
+    "📅 분석할 월 선택",
+    list(range(1, 13)),
+    format_func=lambda x: f"{x}월"
+)
 
-    # 1907~2025년 전체 연도 구성
-    years = np.arange(1907, 2026)
+forecast_year = st.sidebar.number_input(
+    "🔮 예측할 연도 입력",
+    min_value=2026,
+    max_value=2200,
+    value=2030,
+    step=1
+)
 
-    actual = actual.reindex(years)
+st.sidebar.divider()
 
-    # 내부 결측치만 보간
-    training_data = actual.interpolate(
-        method="linear",
-        limit_area="inside"
-    ).dropna()
+missing_method = st.sidebar.selectbox(
+    "🧩 결측치 처리 방법",
+    [
+        "1. 제거",
+        "2. 중앙값으로 대체",
+        "3. 선형보간법"
+    ]
+)
 
-    if len(training_data) < 10:
+algorithm = st.sidebar.selectbox(
+    "🤖 예측 알고리즘 선택",
+    [
+        "선형회귀",
+        "랜덤 포레스트",
+        "홀트(Holt)"
+    ]
+)
 
-        st.warning("예측에 필요한 데이터가 부족합니다.")
+# --------------------------------------------------
+# 4. 월별 연도별 평균기온 데이터 만들기
+# --------------------------------------------------
 
-    else:
+monthly_df = df[df["월"] == month].copy()
 
-        # 학습 데이터 준비
-        X = training_data.index.to_numpy().reshape(-1, 1)
-        y = training_data.to_numpy(dtype=float)
+yearly_data = (
+    monthly_df.groupby("연도")["평균기온(℃)"]
+    .mean()
+)
 
-        # 미래 연도
-        future_years = np.arange(
-            2026,
-            int(forecast_year) + 1
+# 1907~2025년 전체 연도 생성
+all_years = pd.Index(
+    range(1907, 2026),
+    name="연도"
+)
+
+yearly_data = yearly_data.reindex(all_years)
+
+# --------------------------------------------------
+# 5. 결측치 처리 함수
+# --------------------------------------------------
+
+def handle_missing(data, method):
+
+    result = data.copy()
+
+    if method == "1. 제거":
+        result = result.dropna()
+
+    elif method == "2. 중앙값으로 대체":
+        median_value = result.median()
+
+        if pd.isna(median_value):
+            raise ValueError("대체할 중앙값이 없습니다.")
+
+        result = result.fillna(median_value)
+
+    elif method == "3. 선형보간법":
+        result = result.interpolate(
+            method="linear",
+            limit_direction="both"
         )
 
-        future_X = future_years.reshape(-1, 1)
+    return result.dropna()
 
-        # ----------------------------------
-        # 3. 알고리즘 1 : 선형 회귀
-        # ----------------------------------
 
-        linear_model = LinearRegression()
+# --------------------------------------------------
+# 6. 예측 알고리즘 함수
+# --------------------------------------------------
 
-        linear_model.fit(X, y)
+def predict_temperature(data, target_year, model_name):
 
-        linear_history = linear_model.predict(X)
+    data = data.dropna()
 
-        linear_future = linear_model.predict(future_X)
+    if len(data) < 3:
+        raise ValueError(
+            "예측을 위해서는 최소 3개 이상의 데이터가 필요합니다."
+        )
 
-        # ----------------------------------
-        # 4. 알고리즘 2 : 랜덤 포레스트
-        # ----------------------------------
+    years = data.index.to_numpy(dtype=float)
+    values = data.to_numpy(dtype=float)
 
-        forest_model = RandomForestRegressor(
+    future_years = np.arange(
+        2026,
+        target_year + 1
+    )
+
+    if len(future_years) == 0:
+        return np.array([])
+
+    # ① 선형회귀
+    if model_name == "선형회귀":
+
+        model = LinearRegression()
+
+        model.fit(
+            years.reshape(-1, 1),
+            values
+        )
+
+        predictions = model.predict(
+            future_years.reshape(-1, 1)
+        )
+
+    # ② 랜덤 포레스트
+    elif model_name == "랜덤 포레스트":
+
+        model = RandomForestRegressor(
             n_estimators=200,
-            max_depth=5,
-            random_state=42
+            random_state=42,
+            max_depth=5
         )
 
-        forest_model.fit(X, y)
+        model.fit(
+            years.reshape(-1, 1),
+            values
+        )
 
-        forest_history = forest_model.predict(X)
+        predictions = model.predict(
+            future_years.reshape(-1, 1)
+        )
 
-        forest_future = forest_model.predict(future_X)
+    # ③ 홀트
+    elif model_name == "홀트(Holt)":
 
-        # ----------------------------------
-        # 5. 알고리즘 3 : Holt 지수평활법
-        # ----------------------------------
-
-        # 중요: Pandas 인덱스 대신 NumPy 배열 사용
-        train_values = y.astype(float)
-
-        holt_model = Holt(
-            train_values,
-            damped_trend=True,
+        model = Holt(
+            values,
             initialization_method="estimated"
         )
 
-        holt_fit = holt_model.fit(
-            optimized=True
+        fitted_model = model.fit(optimized=True)
+
+        steps = int(target_year - 2025)
+
+        all_predictions = np.asarray(
+            fitted_model.forecast(steps=steps),
+            dtype=float
         )
 
-        holt_history = np.asarray(
-            holt_fit.fittedvalues
-        )
+        predictions = all_predictions[-len(future_years):]
 
-        holt_future = np.asarray(
-            holt_fit.forecast(
-                steps=len(future_years)
-            )
-        )
+    else:
+        raise ValueError("올바르지 않은 알고리즘입니다.")
 
-        # ----------------------------------
-        # 6. 그래프 생성
-        # ----------------------------------
+    return np.asarray(predictions, dtype=float)
 
-        fig = go.Figure()
 
-        # 실제 평균기온
-        fig.add_trace(go.Scatter(
-            x=actual.index,
-            y=actual.values,
-            mode="lines",
-            name="실제 평균기온",
-            line=dict(color="black", width=2),
-            connectgaps=False
-        ))
+# --------------------------------------------------
+# 7. 데이터 결측치 처리
+# --------------------------------------------------
 
-        # 선형 회귀 학습 결과
-        fig.add_trace(go.Scatter(
-            x=training_data.index,
-            y=linear_history,
-            mode="lines",
-            name="선형 회귀 학습",
-            line=dict(color="red", dash="dash", width=2)
-        ))
+try:
+    selected_data = handle_missing(
+        yearly_data,
+        missing_method
+    )
 
-        # 선형 회귀 미래 예측
-        fig.add_trace(go.Scatter(
-            x=np.r_[2025, future_years],
-            y=np.r_[
-                linear_model.predict([[2025]])[0],
-                linear_future
-            ],
-            mode="lines+markers",
-            name="선형 회귀 예측",
-            line=dict(color="red", width=3)
-        ))
+    if len(selected_data) < 3:
+        st.error("선택한 월의 유효한 데이터가 부족합니다.")
+        st.stop()
 
-        # 랜덤 포레스트 학습 결과
-        fig.add_trace(go.Scatter(
-            x=training_data.index,
-            y=forest_history,
-            mode="lines",
-            name="랜덤 포레스트 학습",
-            line=dict(color="blue", dash="dash", width=2)
-        ))
-
-        # 랜덤 포레스트 미래 예측
-        fig.add_trace(go.Scatter(
-            x=np.r_[2025, future_years],
-            y=np.r_[
-                forest_model.predict([[2025]])[0],
-                forest_future
-            ],
-            mode="lines+markers",
-            name="랜덤 포레스트 예측",
-            line=dict(color="blue", width=3)
-        ))
-
-        # Holt 학습 결과
-        fig.add_trace(go.Scatter(
-            x=training_data.index,
-            y=holt_history,
-            mode="lines",
-            name="Holt 학습",
-            line=dict(color="green", dash="dash", width=2)
-        ))
-
-        # Holt 미래 예측
-        fig.add_trace(go.Scatter(
-            x=np.r_[2025, future_years],
-            y=np.r_[
-                holt_history[-1],
-                holt_future
-            ],
-            mode="lines+markers",
-            name="Holt 예측",
-            line=dict(color="green", width=3)
-        ))
-
-        # 미래 예측 시작점
-        fig.add_vline(
-            x=2025.5,
-            line_dash="dot",
-            line_color="gray",
-            annotation_text="2026년부터 미래 예측"
-        )
-
-        # 미래 영역 표시
-        fig.add_vrect(
-            x0=2025.5,
-            x1=int(forecast_year) + 0.5,
-            fillcolor="gray",
-            opacity=0.08,
-            line_width=0
-        )
-
-        # 그래프 디자인
-        fig.update_layout(
-            title=f"{month}월 평균기온 분석 및 미래 예측",
-            xaxis_title="연도",
-            yaxis_title="평균기온 (℃)",
-            template="plotly_white",
-            hovermode="x unified",
-            height=650,
-            legend=dict(
-                title="알고리즘 범례",
-                orientation="h",
-                y=1.15,
-                x=0
-            )
-        )
-
-        fig.update_xaxes(
-            range=[1907, int(forecast_year) + 1],
-            dtick=10
-        )
-
-        # 그래프 출력
-        st.subheader("📈 실제 기온과 미래 예측 비교")
-
-        st.caption(
-            "검은색: 실제 데이터 | "
-            "점선: 과거 학습 결과 | "
-            "실선: 미래 예측"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-        # ----------------------------------
-        # 7. 알고리즘 설명
-        # ----------------------------------
-
-        st.divider()
-
-        st.subheader("🧠 예측 알고리즘 설명")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.markdown("### 🔴 선형 회귀")
-            st.write(
-                "과거 기온의 전체적인 증가와 감소 추세를 "
-                "직선으로 학습합니다. "
-                "이 추세를 미래까지 연장하여 예측합니다."
-            )
-            st.caption("그래프 특징: 직선 형태")
-
-        with col2:
-            st.markdown("### 🔵 랜덤 포레스트")
-            st.write(
-                "여러 결정 트리가 과거 기온 데이터를 "
-                "학습하고 각각의 예측 결과를 평균 내어 "
-                "미래 기온을 계산합니다."
-            )
-            st.caption("그래프 특징: 구간별 패턴")
-
-        with col3:
-            st.markdown("### 🟢 Holt")
-            st.write(
-                "최근 기온과 변화 추세에 가중치를 주어 "
-                "미래 기온을 부드럽게 예측합니다."
-            )
-            st.caption("그래프 특징: 추세를 반영한 곡선")
-
-        # ----------------------------------
-        # 8. 예측 결과 표
-        # ----------------------------------
-
-        st.divider()
-
-        st.subheader("🔮 미래 기온 예측 결과")
-
-        prediction = pd.DataFrame({
-            "연도": future_years,
-            "선형 회귀(℃)": linear_future,
-            "랜덤 포레스트(℃)": forest_future,
-            "Holt(℃)": holt_future
-        })
-
-        st.dataframe(
-            prediction.round(2),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.success(
-            f"{month}월의 {forecast_year}년까지 예측이 완료되었습니다."
-        )
-
-        st.info(
-            "예측 결과는 과거 평균기온만 학습한 통계적 추정치입니다. "
-            "실제 기온과 다를 수 있으며 온실가스, 기후변화 등 "
-            "외부 요인은 반영하지 않았습니다."
-        )
-
-except FileNotFoundError:
-    st.error(
-        "temperature.csv 파일이 없습니다. "
-        "app.py와 같은 폴더에 업로드해 주세요."
+    main_predictions = predict_temperature(
+        selected_data,
+        int(forecast_year),
+        algorithm
     )
 
 except Exception as e:
-    st.error(f"오류가 발생했습니다: {e}")
+    st.error(f"분석 중 오류가 발생했습니다: {e}")
+    st.stop()
+
+
+# --------------------------------------------------
+# 8. 주요 정보 표시
+# --------------------------------------------------
+
+st.subheader(f"📊 {month}월 평균기온 분석 결과")
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric(
+    "분석 데이터 개수",
+    f"{len(selected_data)}개"
+)
+
+col2.metric(
+    "결측 데이터 개수",
+    f"{int(yearly_data.isna().sum())}개"
+)
+
+col3.metric(
+    "예측 연도",
+    f"{forecast_year}년"
+)
+
+st.caption(
+    f"선택한 처리 방법: {missing_method} | "
+    f"선택한 알고리즘: {algorithm}"
+)
+
+# --------------------------------------------------
+# 9. 실제 기온 + 미래 예측 그래프
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader("🌡️ 실제 기온과 미래 예측 그래프")
+
+fig = go.Figure()
+
+fig.add_trace(go.Scatter(
+    x=selected_data.index,
+    y=selected_data.values,
+    mode="lines",
+    name="실제 평균기온",
+    line=dict(width=2)
+))
+
+future_years = np.arange(2026, forecast_year + 1)
+
+fig.add_trace(go.Scatter(
+    x=future_years,
+    y=main_predictions,
+    mode="lines+markers",
+    name=f"{algorithm} 예측",
+    line=dict(width=3, dash="dash")
+))
+
+fig.update_layout(
+    title=f"{month}월 평균기온: 1907~{forecast_year}년",
+    xaxis_title="연도",
+    yaxis_title="평균기온(℃)",
+    hovermode="x unified",
+    template="plotly_white"
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+if len(main_predictions) > 0:
+    st.success(
+        f"🔮 {forecast_year}년 {month}월 예측 평균기온: "
+        f"{main_predictions[-1]:.2f}℃"
+    )
+
+# --------------------------------------------------
+# 10. 결측치 처리 방법별 예측 비교
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader("🧩 결측치 처리 방법에 따른 예측 결과 비교")
+
+st.write(
+    "동일한 알고리즘을 사용하고 결측치 처리 방법만 변경하여 "
+    "예측 결과를 비교합니다."
+)
+
+methods = [
+    "1. 제거",
+    "2. 중앙값으로 대체",
+    "3. 선형보간법"
+]
+
+missing_fig = go.Figure()
+
+missing_results = {}
+
+for method in methods:
+
+    try:
+        processed_data = handle_missing(
+            yearly_data,
+            method
+        )
+
+        predictions = predict_temperature(
+            processed_data,
+            int(forecast_year),
+            algorithm
+        )
+
+        missing_results[method] = predictions
+
+        missing_fig.add_trace(go.Scatter(
+            x=future_years,
+            y=predictions,
+            mode="lines+markers",
+            name=method
+        ))
+
+    except Exception as e:
+        st.warning(f"{method} 처리 실패: {e}")
+
+missing_fig.update_layout(
+    title=f"{algorithm} 알고리즘 - 결측치 처리 방법별 예측",
+    xaxis_title="연도",
+    yaxis_title="예측 평균기온(℃)",
+    hovermode="x unified",
+    template="plotly_white"
+)
+
+st.plotly_chart(
+    missing_fig,
+    use_container_width=True
+)
+
+# 예측값 비교표
+if missing_results:
+
+    comparison_data = []
+
+    for method, predictions in missing_results.items():
+
+        if len(predictions) > 0:
+            comparison_data.append({
+                "결측치 처리 방법": method,
+                f"{forecast_year}년 예측 기온(℃)": round(
+                    float(predictions[-1]), 2
+                )
+            })
+
+    st.dataframe(
+        pd.DataFrame(comparison_data),
+        use_container_width=True,
+        hide_index=True
+    )
+
+# --------------------------------------------------
+# 11. 알고리즘별 예측 결과 비교
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader("🤖 알고리즘에 따른 예측 결과 비교")
+
+st.write(
+    "동일한 결측치 처리 방법을 적용하고 "
+    "예측 알고리즘만 변경하여 비교합니다."
+)
+
+algorithms = [
+    "선형회귀",
+    "랜덤 포레스트",
+    "홀트(Holt)"
+]
+
+algorithm_fig = go.Figure()
+
+algorithm_results = {}
+
+for model_name in algorithms:
+
+    try:
+        predictions = predict_temperature(
+            selected_data,
+            int(forecast_year),
+            model_name
+        )
+
+        algorithm_results[model_name] = predictions
+
+        algorithm_fig.add_trace(go.Scatter(
+            x=future_years,
+            y=predictions,
+            mode="lines+markers",
+            name=model_name
+        ))
+
+    except Exception as e:
+        st.warning(f"{model_name} 예측 실패: {e}")
+
+algorithm_fig.update_layout(
+    title=f"{missing_method} 적용 - 알고리즘별 예측",
+    xaxis_title="연도",
+    yaxis_title="예측 평균기온(℃)",
+    hovermode="x unified",
+    template="plotly_white"
+)
+
+st.plotly_chart(
+    algorithm_fig,
+    use_container_width=True
+)
+
+# 알고리즘별 예측값 표
+if algorithm_results:
+
+    algorithm_table = []
+
+    for name, predictions in algorithm_results.items():
+
+        if len(predictions) > 0:
+            algorithm_table.append({
+                "예측 알고리즘": name,
+                f"{forecast_year}년 예측 기온(℃)": round(
+                    float(predictions[-1]), 2
+                )
+            })
+
+    st.dataframe(
+        pd.DataFrame(algorithm_table),
+        use_container_width=True,
+        hide_index=True
+    )
+
+# --------------------------------------------------
+# 12. 결측치 처리 전후 데이터 확인
+# --------------------------------------------------
+
+st.divider()
+
+with st.expander("🔍 결측치 처리 전후 데이터 확인하기"):
+
+    before_df = yearly_data.rename(
+        "처리 전 평균기온"
+    ).reset_index()
+
+    after_df = selected_data.rename(
+        "처리 후 평균기온"
+    ).reset_index()
+
+    st.write("결측치 처리 전")
+    st.dataframe(
+        before_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.write("결측치 처리 후")
+    st.dataframe(
+        after_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+st.caption(
+    "※ 예측값은 과거 데이터에 기반한 통계적 추정치이며 "
+    "실제 미래 기온과 다를 수 있습니다."
+)
