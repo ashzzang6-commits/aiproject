@@ -5,9 +5,10 @@ import numpy as np
 import zipfile
 from pathlib import Path
 import re
+from urllib.parse import quote_plus
 
 # -------------------------
-# 기본 설정
+# 1. 기본 설정
 # -------------------------
 st.set_page_config(
     page_title="Mood Music",
@@ -16,17 +17,17 @@ st.set_page_config(
 )
 
 # -------------------------
-# 디자인
+# 2. 디자인
 # -------------------------
 st.markdown("""
 <style>
 .stApp {
     background-color: #211638;
-    color: #FFFFFF;
+    color: white;
 }
 
-h1, h2, h3, p, label, span, div {
-    color: #FFFFFF;
+h1, h2, h3, p, label, span {
+    color: white !important;
 }
 
 h1 {
@@ -35,12 +36,7 @@ h1 {
 
 .stSelectbox label,
 .stSlider label {
-    color: #FFFFFF !important;
-}
-
-div[data-baseweb="select"] {
-    background-color: #FFFFFF;
-    border-radius: 8px;
+    color: white !important;
 }
 
 .stButton > button {
@@ -67,19 +63,12 @@ div[data-testid="stMetricValue"] {
     color: #D9B8FF;
 }
 
-div[data-testid="stDataFrame"] {
-    background-color: #FFFFFF;
-}
-
-hr {
-    border-color: #76569B;
-}
 </style>
 """, unsafe_allow_html=True)
 
 
 # -------------------------
-# 데이터 불러오기
+# 3. 데이터 불러오기
 # -------------------------
 @st.cache_data
 def load_data():
@@ -107,7 +96,7 @@ except Exception as e:
 
 
 # -------------------------
-# 데이터 정리
+# 4. 데이터 정리
 # -------------------------
 features = [
     "energy",
@@ -126,9 +115,16 @@ required = [
 
 df = df.dropna(subset=required).copy()
 
+df["playlist_genre"] = (
+    df["playlist_genre"].astype(str).str.strip().str.lower()
+)
+
+df["track_artist"] = df["track_artist"].astype(str)
+df["track_name"] = df["track_name"].astype(str)
+
 
 # -------------------------
-# K-POP 검색용 분류
+# 5. K-POP 가수 분류
 # -------------------------
 kpop_artists = [
     "BTS", "BLACKPINK", "TWICE", "EXO",
@@ -137,26 +133,30 @@ kpop_artists = [
     "LE SSERAFIM", "ITZY", "TXT",
     "RED VELVET", "GOT7", "BIGBANG",
     "G-DRAGON", "JUNGKOOK", "JIMIN",
-    "PSY", "IU", "TAEYEON", "ENHYPEN"
+    "PSY", "IU", "TAEYEON", "ENHYPEN",
+    "ATEEZ", "MONSTA X", "MAMAMOO",
+    "SUPER JUNIOR", "SHINee", "2NE1",
+    "WONDER GIRLS", "GIRLS GENERATION",
+    "SNSD", "TOMORROW X TOGETHER"
 ]
 
-def is_kpop(row):
-    artist = str(row["track_artist"]).upper()
-    name = str(row["track_name"])
+def is_kpop(artist):
+    artist = artist.upper().strip()
 
-    has_korean = bool(
-        re.search(r"[가-힣]", artist + name)
-    )
+    # 등록된 K-POP 가수 확인
+    for name in kpop_artists:
+        if name in artist:
+            return True
 
-    known_artist = any(
-        name in artist for name in kpop_artists
-    )
+    # 한글 이름을 사용하는 가수 확인
+    if re.search(r"[가-힣]", artist):
+        return True
 
-    return has_korean or known_artist
+    return False
 
 
 # -------------------------
-# 음악 추천 설정
+# 6. 기분별 음악 특성
 # -------------------------
 moods = {
     "신나는": [0.90, 0.85, 0.85, 0.10, 0.05],
@@ -167,24 +167,46 @@ moods = {
 }
 
 
+# -------------------------
+# 7. 노래 추천 함수
+# -------------------------
 def recommend(data, mood, genre, count):
 
     result = data.copy()
 
+    # 장르를 먼저 정확하게 필터링
     if genre == "K-POP":
-        result = result[result.apply(is_kpop, axis=1)]
 
-    elif genre != "전체":
         result = result[
-            result["playlist_genre"] == genre.lower()
-        ]
+            result["track_artist"].apply(is_kpop)
+        ].copy()
 
+    else:
+
+        genre_mapping = {
+            "POP": "pop",
+            "EDM": "edm",
+            "RAP": "rap",
+            "R&B": "r&b",
+            "ROCK": "rock",
+            "LATIN": "latin"
+        }
+
+        selected_genre = genre_mapping.get(genre)
+
+        if selected_genre:
+            result = result[
+                result["playlist_genre"] == selected_genre
+            ].copy()
+
+    # 데이터가 없는 경우
     if result.empty:
         return result
 
+    # 선택한 기분과 음악 특성 비교
     target = np.array(moods[mood])
 
-    values = result[features].to_numpy()
+    values = result[features].to_numpy(dtype=float)
 
     distance = np.sqrt(
         np.sum((values - target) ** 2, axis=1)
@@ -192,27 +214,39 @@ def recommend(data, mood, genre, count):
 
     result["similarity"] = 1 / (1 + distance)
 
+    # 유사도가 높은 노래부터 정렬
     result = result.sort_values(
-        "similarity", ascending=False
+        by="similarity",
+        ascending=False
     )
 
+    # 중복 노래 제거
     result = result.drop_duplicates(
         subset=["track_name", "track_artist"]
     )
+
+    # 선택한 장르의 노래만 반환하는지 마지막으로 확인
+    if genre != "K-POP":
+        result = result[
+            result["playlist_genre"] == selected_genre
+        ]
+
+    else:
+        result = result[
+            result["track_artist"].apply(is_kpop)
+        ]
 
     return result.head(count)
 
 
 # -------------------------
-# 메인 화면
+# 8. 메인 화면
 # -------------------------
 st.title("🎧 MOOD MUSIC")
-
 st.write("오늘의 기분에 어울리는 음악을 찾아보세요.")
 
 st.divider()
 
-# 데이터 정보
 col1, col2, col3 = st.columns(3)
 
 col1.metric("전체 노래", f"{len(df):,}곡")
@@ -223,7 +257,7 @@ st.divider()
 
 
 # -------------------------
-# 사용자 선택
+# 9. 음악 취향 선택
 # -------------------------
 st.subheader("💜 나의 음악 취향")
 
@@ -237,7 +271,7 @@ with col1:
 
 with col2:
     genre = st.selectbox(
-        "음악 장르",
+        "원하는 음악 장르",
         [
             "전체",
             "K-POP",
@@ -255,33 +289,66 @@ count = st.slider(
     5, 20, 10
 )
 
-st.write("")
 
+# -------------------------
+# 10. 추천 버튼
+# -------------------------
 if st.button("🎵 노래 추천받기", use_container_width=True):
 
-    result = recommend(df, mood, genre, count)
+    # 이전 결과 삭제
+    st.session_state.pop("songs", None)
+
+    result = recommend(
+        df,
+        mood,
+        genre,
+        count
+    )
 
     if result.empty:
-        st.session_state.pop("songs", None)
         st.warning(
-            "해당 장르의 노래가 데이터에 없습니다. "
+            "선택한 장르에 해당하는 노래가 없습니다. "
             "다른 장르를 선택해 주세요."
         )
     else:
         st.session_state["songs"] = result
+        st.session_state["selected_genre"] = genre
 
 
 # -------------------------
-# 추천 결과
+# 11. 추천 결과
 # -------------------------
 if "songs" in st.session_state:
 
     result = st.session_state["songs"]
+    selected_genre = st.session_state["selected_genre"]
 
     st.divider()
     st.subheader("✨ 추천 음악")
 
-    st.write(f"총 {len(result)}곡을 추천합니다.")
+    st.write(
+        f"선택한 장르: {selected_genre}"
+    )
+
+    st.write(
+        f"총 {len(result)}곡을 추천합니다."
+    )
+
+    # 장르 일치 여부 표시
+    if selected_genre != "K-POP":
+        genre_mapping = {
+            "POP": "pop",
+            "EDM": "edm",
+            "RAP": "rap",
+            "R&B": "r&b",
+            "ROCK": "rock",
+            "LATIN": "latin"
+        }
+
+        expected = genre_mapping.get(selected_genre)
+
+        if selected_genre != "전체":
+            assert (result["playlist_genre"] == expected).all()
 
     for i, row in enumerate(
         result.to_dict("records"), 1
@@ -293,17 +360,19 @@ if "songs" in st.session_state:
                 f"### 🎧 {i}. {row['track_name']}"
             )
 
-            st.write(f"아티스트: {row['track_artist']}")
-
             st.write(
-                f"장르: {row['playlist_genre'].upper()}"
+                f"🎤 아티스트: {row['track_artist']}"
             )
 
-            st.write(
-                f"추천 일치도: {row['similarity'] * 100:.1f}%"
-            )
+            if selected_genre == "K-POP":
+                st.write("🎼 장르: K-POP (가수 기준 추정)")
+            else:
+                st.write(f"🎼 장르: {selected_genre}")
 
-            from urllib.parse import quote_plus
+            st.write(
+                f"💜 분위기 일치도: "
+                f"{row['similarity'] * 100:.1f}%"
+            )
 
             url = (
                 "https://open.spotify.com/search/"
@@ -313,10 +382,12 @@ if "songs" in st.session_state:
             )
 
             st.markdown(
-                f"[Spotify에서 노래 듣기 및 검색하기]({url})"
+                f"[Spotify에서 노래 검색하기]({url})"
             )
 
-    # 다운로드
+    # -------------------------
+    # 12. 추천 목록 다운로드
+    # -------------------------
     st.divider()
 
     csv = result.to_csv(
@@ -333,8 +404,7 @@ if "songs" in st.session_state:
 
 
 # -------------------------
-# 하단
+# 13. 하단
 # -------------------------
 st.divider()
-
-st.caption("MOOD MUSIC | Your music, your mood.")
+st.caption("MOOD MUSIC | Your music, your mood 🎧")
