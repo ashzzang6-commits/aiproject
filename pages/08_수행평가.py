@@ -97,7 +97,6 @@ def load_data():
             with zipfile.ZipFile(path) as z:
 
                 with z.open("spotify_songs.csv") as f:
-
                     return pd.read_csv(f)
 
     raise FileNotFoundError(
@@ -109,7 +108,6 @@ try:
     df = load_data()
 
 except Exception as e:
-
     st.error(f"데이터 오류: {e}")
     st.stop()
 
@@ -142,13 +140,8 @@ df["playlist_genre"] = (
     .str.lower()
 )
 
-df["track_artist"] = (
-    df["track_artist"].astype(str)
-)
-
-df["track_name"] = (
-    df["track_name"].astype(str)
-)
+df["track_artist"] = df["track_artist"].astype(str)
+df["track_name"] = df["track_name"].astype(str)
 
 
 # ==================================
@@ -169,6 +162,7 @@ kpop_artists = {
     "LE SSERAFIM": "르세라핌",
     "ITZY": "있지",
     "TXT": "투모로우바이투게더",
+    "TOMORROW X TOGETHER": "투모로우바이투게더",
     "RED VELVET": "레드벨벳",
     "GOT7": "갓세븐",
     "BIGBANG": "빅뱅",
@@ -187,7 +181,26 @@ kpop_artists = {
     "2NE1": "투애니원",
     "WONDER GIRLS": "원더걸스",
     "GIRLS GENERATION": "소녀시대",
-    "SNSD": "소녀시대"
+    "SNSD": "소녀시대",
+    "RIIZE": "라이즈",
+    "BOYNEXTDOOR": "보이넥스트도어",
+    "NMIXX": "엔믹스",
+    "TREASURE": "트레저",
+    "THE BOYZ": "더보이즈",
+    "STAYC": "스테이씨",
+    "KISS OF LIFE": "키스오브라이프",
+    "ILLIT": "아일릿",
+    "BABYMONSTER": "베이비몬스터",
+    "TWS": "투어스",
+    "ZEROBASEONE": "제로베이스원",
+    "DAY6": "데이식스",
+    "WOODZ": "우즈",
+    "ZICO": "지코",
+    "BAEKHYUN": "백현",
+    "TAEMIN": "태민",
+    "WENDY": "웬디",
+    "HEIZE": "헤이즈",
+    "BOL4": "볼빨간사춘기"
 }
 
 
@@ -200,7 +213,6 @@ def korean_artist_name(artist):
         if eng in artist_upper:
             return kor
 
-    # 등록되지 않은 한글 가수는 원래 이름 유지
     return artist
 
 
@@ -208,13 +220,11 @@ def is_kpop(artist):
 
     artist_upper = str(artist).upper().strip()
 
-    # 등록된 K-POP 가수인지 확인
     for name in kpop_artists.keys():
 
         if name in artist_upper:
             return True
 
-    # 한글 이름을 사용하는 가수 확인
     if re.search(r"[가-힣]", str(artist)):
         return True
 
@@ -258,18 +268,16 @@ def recommend(data, mood, genre, count):
 
     result = data.copy()
 
-    # 장르 필터링
-
     genre_mapping = {
-
         "POP": "pop",
         "EDM": "edm",
         "RAP": "rap",
         "R&B": "r&b",
         "ROCK": "rock",
         "LATIN": "latin"
-
     }
+
+    # 장르 필터링
 
     if genre == "K-POP":
 
@@ -284,8 +292,6 @@ def recommend(data, mood, genre, count):
         result = result[
             result["playlist_genre"] == selected_genre
         ].copy()
-
-    # 데이터가 없는 경우
 
     if result.empty:
         return result
@@ -302,6 +308,12 @@ def recommend(data, mood, genre, count):
 
     result["similarity"] = 1 / (1 + distance)
 
+    # 중복 노래 제거
+
+    result = result.drop_duplicates(
+        subset=["track_name", "track_artist"]
+    )
+
     # 추천 순서 정렬
 
     result = result.sort_values(
@@ -309,13 +321,57 @@ def recommend(data, mood, genre, count):
         ascending=False
     )
 
-    # 중복 제거
+    # ==================================
+    # K-POP 아티스트 다양성 개선
+    # ==================================
 
-    result = result.drop_duplicates(
-        subset=["track_name", "track_artist"]
-    )
+    if genre == "K-POP":
 
-    return result.head(count)
+        # 아티스트 이름을 기준으로 구분
+
+        result["_artist_key"] = (
+            result["track_artist"]
+            .str.strip()
+            .str.lower()
+        )
+
+        # 한 아티스트당 최대 2곡
+
+        result = (
+            result.groupby(
+                "_artist_key",
+                sort=False,
+                group_keys=False
+            )
+            .head(2)
+            .copy()
+        )
+
+        # 기분과 비슷한 노래 중에서 후보 선정
+
+        candidate_count = min(
+            len(result),
+            max(count * 4, count)
+        )
+
+        candidates = result.head(candidate_count).copy()
+
+        # 추천할 때마다 노래를 새롭게 섞기
+
+        result = candidates.sample(
+            n=min(count, len(candidates)),
+            replace=False
+        )
+
+        result = result.drop(
+            columns=["_artist_key"]
+        )
+
+    else:
+
+        result = result.head(count)
+
+    return result
 
 
 # ==================================
@@ -447,6 +503,14 @@ if "songs" in st.session_state:
         f"총 {len(result)}곡을 추천합니다."
     )
 
+    if selected_genre == "K-POP":
+
+        artist_count = result["track_artist"].nunique()
+
+        st.success(
+            f"💜 총 {artist_count}명의 아티스트가 추천되었어요!"
+        )
+
     # 추천 노래 표시
 
     for i, row in enumerate(
@@ -511,7 +575,6 @@ if "songs" in st.session_state:
             st.markdown(
                 f"[Spotify에서 노래 검색하기]({url})"
             )
-
 
     # ==================================
     # 13. 추천 목록 다운로드
